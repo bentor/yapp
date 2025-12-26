@@ -9,12 +9,11 @@ import (
 )
 
 func TestParseExamplePDFs(t *testing.T) {
-	pdfs := testPDFsFromEnv()
+	moduleRoot := findModuleRoot(t)
+	pdfs := testPDFsFromEnv(moduleRoot)
 	if len(pdfs) == 0 {
 		t.Skip("no TEST_PDFS provided and no defaults found")
 	}
-
-	moduleRoot := findModuleRoot(t)
 
 	for _, pdfPath := range pdfs {
 		if strings.TrimSpace(pdfPath) == "" {
@@ -51,7 +50,7 @@ func TestParseExamplePDFs(t *testing.T) {
 				t.Fatalf("marshal AST: %v", err)
 			}
 
-			resultDir := filepath.Join(moduleRoot, "test-result")
+			resultDir := filepath.Join(resultRoot(moduleRoot), "test-result")
 			if err := os.MkdirAll(resultDir, 0o755); err != nil {
 				t.Fatalf("mkdir %s: %v", resultDir, err)
 			}
@@ -70,25 +69,18 @@ func TestParseExamplePDFs(t *testing.T) {
 	}
 }
 
-func testPDFsFromEnv() []string {
+func testPDFsFromEnv(moduleRoot string) []string {
 	env := strings.TrimSpace(os.Getenv("TEST_PDFS"))
 	if env != "" {
-		return strings.Fields(env)
+		return normalizePDFPaths(strings.Fields(env), moduleRoot, false)
 	}
 
 	// Default to bundled examples if present.
-	defaults := []string{
+	return normalizePDFPaths([]string{
 		"examples/test_doc.pdf",
 		"examples/read_plain_text/pdf_test.pdf",
 		"examples/read_text_with_styles/pdf_test.pdf",
-	}
-	var available []string
-	for _, p := range defaults {
-		if _, err := os.Stat(p); err == nil {
-			available = append(available, p)
-		}
-	}
-	return available
+	}, moduleRoot, true)
 }
 
 func findModuleRoot(t *testing.T) string {
@@ -111,9 +103,66 @@ func findModuleRoot(t *testing.T) string {
 	}
 }
 
+func normalizePDFPaths(paths []string, moduleRoot string, dropMissing bool) []string {
+	repoRoot := filepath.Dir(moduleRoot)
+	var resolved []string
+
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+
+		if filepath.IsAbs(p) {
+			if !dropMissing || pathExists(p) {
+				resolved = append(resolved, p)
+			}
+			continue
+		}
+
+		candidates := []string{
+			filepath.Join(moduleRoot, p),
+			filepath.Join(repoRoot, p),
+		}
+
+		chosen := ""
+		for _, candidate := range candidates {
+			if pathExists(candidate) {
+				chosen = candidate
+				break
+			}
+		}
+
+		if chosen == "" && !dropMissing {
+			chosen = filepath.Join(moduleRoot, p)
+		}
+
+		if chosen != "" {
+			resolved = append(resolved, chosen)
+		}
+	}
+
+	return resolved
+}
+
+func pathExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+func resultRoot(moduleRoot string) string {
+	if filepath.Base(moduleRoot) == "src" {
+		return filepath.Dir(moduleRoot)
+	}
+	return moduleRoot
+}
+
 func slugFromPath(p string) string {
 	clean := filepath.Clean(p)
 	clean = filepath.ToSlash(clean)
+	if filepath.IsAbs(clean) {
+		clean = filepath.Base(clean)
+	}
 	clean = strings.TrimPrefix(clean, "/")
 	clean = strings.TrimPrefix(clean, "./")
 

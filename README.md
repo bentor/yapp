@@ -16,8 +16,14 @@ Because the world absolutely needed one more PDF parser — written in Go, caffe
 
 ## Quick Start
 ```sh
-go run ./cmd/yapp --in examples/test_doc.pdf --out sample.md
+go run ./src/cmd/yapp --in examples/test_doc.pdf --out sample.md
 # or point --in at any PDF you have handy
+```
+
+Build/test helpers:
+```sh
+make build
+make test
 ```
 
 Or consume it as a library:
