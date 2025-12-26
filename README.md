@@ -39,5 +39,5 @@ Issues and PRs welcome. Bad puns encouraged. Tests mandatory. Emojis optional.
 ## License
 TBD, but expect something permissive and PDF-friendly.
 
-Have fun!
+Have fun!  
 /Bent

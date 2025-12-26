@@ -69,21 +69,31 @@ func renderMarkdown(doc DocumentNode) string {
 		}
 
 		for i := 0; i < len(lines); i++ {
-			// Opportunistic table detection: consecutive lines with aligned columns.
-			if rows, used := consumeTable(lines[i:]); used > 0 {
-				flushList()
-				flushPara()
-				renderTable(&b, rows)
-				i += used - 1
-				continue
-			}
-
 			line := lines[i]
 			trim := strings.TrimSpace(line.text)
 
 			if trim == "" {
 				flushList()
 				flushPara()
+				continue
+			}
+
+			if hasBulletPrefix(trim) {
+				flushPara()
+				if text, ok := stripBullet(trim); ok {
+					listItems = append(listItems, text)
+				} else if text, ok := stripNumericBullet(trim); ok {
+					listItems = append(listItems, text)
+				}
+				continue
+			}
+
+			// Opportunistic table detection: consecutive lines with aligned columns.
+			if rows, used := consumeTable(lines[i:]); used > 0 {
+				flushList()
+				flushPara()
+				renderTable(&b, rows)
+				i += used - 1
 				continue
 			}
 
@@ -96,22 +106,10 @@ func renderMarkdown(doc DocumentNode) string {
 				firstHeading = false
 				continue
 			}
-			if isHeading && !hasBulletPrefix(trim) {
+			if isHeading {
 				flushList()
 				flushPara()
 				b.WriteString("## " + trim + "\n\n")
-				continue
-			}
-
-			if text, ok := stripBullet(trim); ok {
-				flushPara()
-				listItems = append(listItems, text)
-				continue
-			}
-
-			if text, ok := stripNumericBullet(trim); ok {
-				flushPara()
-				listItems = append(listItems, text)
 				continue
 			}
 
@@ -285,7 +283,8 @@ func consumeTable(lines []lineStyle) ([][]string, int) {
 		return nil, 0
 	}
 
-	colStarts := clusteredStarts(lines[0].spans, 8)
+	colStarts := clusteredStarts(lines[0].spans, 24)
+	colStarts = mergeStarts(colStarts, 40)
 	if len(colStarts) < 3 || len(colStarts) > 6 {
 		return nil, 0
 	}
@@ -293,8 +292,16 @@ func consumeTable(lines []lineStyle) ([][]string, int) {
 		return nil, 0
 	}
 
+	gap := medianGap(colStarts)
+
 	rows := make([][]string, 0, 4)
-	rows = append(rows, rowFromSpans(lines[0].spans, colStarts))
+	firstOK, firstRow := rowFits(colStarts, lines[0].spans, gap)
+	if !firstOK {
+		return nil, 0
+	}
+	rows = append(rows, firstRow)
+	maxLen := maxCellLen(firstRow)
+	seenNumeric := rowHasDigitOutsideFirst(firstRow)
 	used := 1
 
 	for used < len(lines) {
@@ -302,14 +309,31 @@ func consumeTable(lines []lineStyle) ([][]string, int) {
 		if len(sp) < 2 {
 			break
 		}
-		if !compatibleStarts(colStarts, sp, 10) {
+		ok, row := rowFits(colStarts, sp, gap)
+		if !ok {
 			break
 		}
-		rows = append(rows, rowFromSpans(sp, colStarts))
+		hasNum := rowHasDigitOutsideFirst(row)
+		if seenNumeric && !hasNum {
+			break
+		}
+		if maxCellLen(row) > 40 {
+			break
+		}
+		rows = append(rows, row)
+		if hasNum {
+			seenNumeric = true
+		}
+		if l := maxCellLen(row); l > maxLen {
+			maxLen = l
+		}
 		used++
 	}
 
-	if used < 2 {
+	if len(rows) < 3 {
+		return nil, 0
+	}
+	if idx := firstNumericRow(rows); idx == -1 || idx > 2 {
 		return nil, 0
 	}
 	return rows, used
@@ -335,41 +359,50 @@ func clusteredStarts(spans []TextSpan, tol float64) []float64 {
 	return starts
 }
 
-func compatibleStarts(ref []float64, spans []TextSpan, tol float64) bool {
-	xs := spanStarts(spans)
-	if len(xs) < 2 {
-		return false
+func rowFits(cols []float64, spans []TextSpan, gap float64) (bool, []string) {
+	if len(spans) < 2 {
+		return false, nil
 	}
-	for _, x := range xs {
-		closest := math.MaxFloat64
-		for _, r := range ref {
-			d := math.Abs(r - x)
-			if d < closest {
-				closest = d
-			}
-		}
-		if closest > tol {
-			return false
-		}
-	}
-	return true
-}
-
-func rowFromSpans(spans []TextSpan, cols []float64) []string {
-	buckets := make([][]string, len(cols))
+	buckets := make([][]TextSpan, len(cols))
+	var sumDist float64
 	for _, sp := range spans {
 		idx := nearest(cols, sp.Pos.X)
-		text := strings.TrimSpace(sp.Text)
-		if text == "" {
+		dist := math.Abs(sp.Pos.X - cols[idx])
+		sumDist += dist
+		buckets[idx] = append(buckets[idx], sp)
+	}
+
+	meanDist := sumDist / float64(len(spans))
+	if meanDist > gap*0.8 {
+		return false, nil
+	}
+
+	filled := 0
+	for _, bucket := range buckets {
+		if len(bucket) == 0 {
 			continue
 		}
-		buckets[idx] = append(buckets[idx], text)
+		filled++
+		if w := width(bucket); w > gap*1.6+10 {
+			return false, nil
+		}
 	}
+	if filled < 2 || len(buckets[0]) == 0 {
+		return false, nil
+	}
+
 	row := make([]string, len(cols))
-	for i, parts := range buckets {
-		row[i] = normalizeSpaces(strings.Join(parts, " "))
+	for i, bucket := range buckets {
+		var texts []string
+		for _, sp := range bucket {
+			text := strings.TrimSpace(sp.Text)
+			if text != "" {
+				texts = append(texts, text)
+			}
+		}
+		row[i] = normalizeSpaces(strings.Join(texts, " "))
 	}
-	return row
+	return true, row
 }
 
 func medianGap(xs []float64) float64 {
@@ -411,6 +444,89 @@ func renderTable(b *strings.Builder, rows [][]string) {
 		b.WriteString("| " + strings.Join(row, " | ") + " |\n")
 	}
 	b.WriteString("\n")
+}
+
+func mergeStarts(xs []float64, tol float64) []float64 {
+	if len(xs) == 0 {
+		return xs
+	}
+	sort.Float64s(xs)
+	merged := []float64{xs[0]}
+	for _, x := range xs[1:] {
+		last := merged[len(merged)-1]
+		if math.Abs(x-last) <= tol {
+			merged[len(merged)-1] = (last + x) / 2
+		} else {
+			merged = append(merged, x)
+		}
+	}
+	return merged
+}
+
+func maxCellLen(row []string) int {
+	max := 0
+	for _, c := range row {
+		if l := len(c); l > max {
+			max = l
+		}
+	}
+	return max
+}
+
+func firstNumericRow(rows [][]string) int {
+	for i, row := range rows {
+		if i == 0 {
+			continue // skip header
+		}
+		for _, c := range row {
+			if isNumericLike(c) {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+func rowHasDigitOutsideFirst(row []string) bool {
+	for i, c := range row {
+		if i == 0 {
+			continue
+		}
+		if isNumericLike(c) {
+			return true
+		}
+	}
+	return false
+}
+
+func isNumericLike(s string) bool {
+	hasDigit := false
+	for _, r := range s {
+		switch {
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case unicode.IsLetter(r):
+			return false
+		}
+	}
+	return hasDigit
+}
+
+func width(spans []TextSpan) float64 {
+	if len(spans) == 0 {
+		return 0
+	}
+	minX := spans[0].Pos.X
+	maxX := spans[0].Pos.X
+	for _, sp := range spans {
+		if sp.Pos.X < minX {
+			minX = sp.Pos.X
+		}
+		if sp.Pos.X > maxX {
+			maxX = sp.Pos.X
+		}
+	}
+	return maxX - minX
 }
 
 func isPunctuation(s string) bool {
