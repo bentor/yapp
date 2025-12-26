@@ -12,7 +12,7 @@ import (
 const (
 	lineTolerance = 2.5
 	wordGapFloor  = 1.5
-	wordGapScale  = 0.55
+	wordGapScale  = 0.38
 )
 
 // Lexer walks the PDF and emits tokens akin to lex/flex.
@@ -98,8 +98,7 @@ func groupLines(glyphs []pdf.Text) [][]pdf.Text {
 	var anchorY float64
 
 	for _, g := range glyphs {
-		text := strings.TrimSpace(g.S)
-		if text == "" {
+		if g.S == "" {
 			continue
 		}
 		if len(line) == 0 {
@@ -133,7 +132,7 @@ func buildWords(line []pdf.Text, page int) []Token {
 	var haveWord bool
 
 	flush := func() {
-		word := strings.TrimSpace(buf.String())
+		word := cleanGlyphText(buf.String())
 		if word == "" || !haveWord {
 			buf.Reset()
 			haveWord = false
@@ -157,8 +156,14 @@ func buildWords(line []pdf.Text, page int) []Token {
 	}
 
 	for _, g := range line {
-		ch := strings.TrimSpace(g.S)
+		raw := g.S
+		if raw == "\uFFFD" {
+			continue
+		}
+		ch := strings.TrimSpace(raw)
 		if ch == "" {
+			// Preserve explicit spacing by flushing any buffered word.
+			flush()
 			continue
 		}
 
@@ -181,6 +186,11 @@ func buildWords(line []pdf.Text, page int) []Token {
 	}
 	flush()
 	return tokens
+}
+
+func cleanGlyphText(s string) string {
+	s = strings.ReplaceAll(s, "\uFFFD", "")
+	return strings.TrimSpace(s)
 }
 
 func maxFontSize(line []pdf.Text) float64 {

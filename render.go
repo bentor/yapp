@@ -1,11 +1,19 @@
 package yapp
 
 import (
+	"math"
 	"sort"
 	"strconv"
 	"strings"
 	"unicode"
 )
+
+type lineStyle struct {
+	text     string
+	fontSize float64
+	spans    []TextSpan
+	xs       []float64
+}
 
 func renderMarkdown(doc DocumentNode) string {
 	var b strings.Builder
@@ -21,27 +29,22 @@ func renderMarkdown(doc DocumentNode) string {
 			b.WriteString("\n\n")
 		}
 
-		type lineStyle struct {
-			text     string
-			fontSize float64
-			spans    []TextSpan
-		}
-
-		// Flatten blocks into line strings while preserving basic style hints.
-		var lines []lineStyle
-		for _, block := range page.Blocks {
-			for _, line := range block.Lines {
-				text := strings.TrimSpace(joinSpans(line.Spans))
-				if text == "" {
-					continue
-				}
-				lines = append(lines, lineStyle{
-					text:     normalizeSpaces(text),
-					fontSize: maxSpanSize(line.Spans),
-					spans:    line.Spans,
-				})
+	// Flatten blocks into line strings while preserving basic style hints.
+	var lines []lineStyle
+	for _, block := range page.Blocks {
+		for _, line := range block.Lines {
+			text := strings.TrimSpace(joinSpans(line.Spans))
+			if text == "" {
+				continue
 			}
+			lines = append(lines, lineStyle{
+				text:     normalizeSpaces(text),
+				fontSize: maxSpanSize(line.Spans),
+				spans:    line.Spans,
+				xs:       spanStarts(line.Spans),
+			})
 		}
+	}
 
 		// Render with generic structure detection.
 		firstHeading := true
@@ -65,7 +68,17 @@ func renderMarkdown(doc DocumentNode) string {
 			listItems = nil
 		}
 
-		for _, line := range lines {
+		for i := 0; i < len(lines); i++ {
+			// Opportunistic table detection: consecutive lines with aligned columns.
+			if rows, used := consumeTable(lines[i:]); used > 0 {
+				flushList()
+				flushPara()
+				renderTable(&b, rows)
+				i += used - 1
+				continue
+			}
+
+			line := lines[i]
 			trim := strings.TrimSpace(line.text)
 
 			if trim == "" {
@@ -257,6 +270,147 @@ func medianFontSize(doc DocumentNode) float64 {
 	}
 	sort.Float64s(sizes)
 	return sizes[len(sizes)/2]
+}
+
+func spanStarts(spans []TextSpan) []float64 {
+	xs := make([]float64, 0, len(spans))
+	for _, sp := range spans {
+		xs = append(xs, sp.Pos.X)
+	}
+	return xs
+}
+
+func consumeTable(lines []lineStyle) ([][]string, int) {
+	if len(lines) == 0 || len(lines[0].spans) < 3 {
+		return nil, 0
+	}
+
+	colStarts := clusteredStarts(lines[0].spans, 8)
+	if len(colStarts) < 3 || len(colStarts) > 6 {
+		return nil, 0
+	}
+	if medianGap(colStarts) < 18 {
+		return nil, 0
+	}
+
+	rows := make([][]string, 0, 4)
+	rows = append(rows, rowFromSpans(lines[0].spans, colStarts))
+	used := 1
+
+	for used < len(lines) {
+		sp := lines[used].spans
+		if len(sp) < 2 {
+			break
+		}
+		if !compatibleStarts(colStarts, sp, 10) {
+			break
+		}
+		rows = append(rows, rowFromSpans(sp, colStarts))
+		used++
+	}
+
+	if used < 2 {
+		return nil, 0
+	}
+	return rows, used
+}
+
+func clusteredStarts(spans []TextSpan, tol float64) []float64 {
+	var starts []float64
+	for _, sp := range spans {
+		x := sp.Pos.X
+		placed := false
+		for i, v := range starts {
+			if math.Abs(v-x) <= tol {
+				starts[i] = (v + x) / 2
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			starts = append(starts, x)
+		}
+	}
+	sort.Float64s(starts)
+	return starts
+}
+
+func compatibleStarts(ref []float64, spans []TextSpan, tol float64) bool {
+	xs := spanStarts(spans)
+	if len(xs) < 2 {
+		return false
+	}
+	for _, x := range xs {
+		closest := math.MaxFloat64
+		for _, r := range ref {
+			d := math.Abs(r - x)
+			if d < closest {
+				closest = d
+			}
+		}
+		if closest > tol {
+			return false
+		}
+	}
+	return true
+}
+
+func rowFromSpans(spans []TextSpan, cols []float64) []string {
+	buckets := make([][]string, len(cols))
+	for _, sp := range spans {
+		idx := nearest(cols, sp.Pos.X)
+		text := strings.TrimSpace(sp.Text)
+		if text == "" {
+			continue
+		}
+		buckets[idx] = append(buckets[idx], text)
+	}
+	row := make([]string, len(cols))
+	for i, parts := range buckets {
+		row[i] = normalizeSpaces(strings.Join(parts, " "))
+	}
+	return row
+}
+
+func medianGap(xs []float64) float64 {
+	if len(xs) < 2 {
+		return 0
+	}
+	gaps := make([]float64, 0, len(xs)-1)
+	for i := 1; i < len(xs); i++ {
+		gaps = append(gaps, xs[i]-xs[i-1])
+	}
+	sort.Float64s(gaps)
+	return gaps[len(gaps)/2]
+}
+
+func nearest(values []float64, target float64) int {
+	closestIdx := 0
+	closest := math.MaxFloat64
+	for i, v := range values {
+		if d := math.Abs(v - target); d < closest {
+			closest = d
+			closestIdx = i
+		}
+	}
+	return closestIdx
+}
+
+func renderTable(b *strings.Builder, rows [][]string) {
+	if len(rows) == 0 {
+		return
+	}
+	header := rows[0]
+	sep := make([]string, len(header))
+	for i := range sep {
+		sep[i] = "---"
+	}
+	b.WriteString("| " + strings.Join(header, " | ") + " |\n")
+	b.WriteString("| " + strings.Join(sep, " | ") + " |\n")
+	for _, row := range rows[1:] {
+		b.WriteString("| " + strings.Join(row, " | ") + " |\n")
+	}
+	b.WriteString("\n")
 }
 
 func isPunctuation(s string) bool {
