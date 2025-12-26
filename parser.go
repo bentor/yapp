@@ -1,4 +1,4 @@
-package main
+package yapp
 
 // Parser groups tokens into a simple AST, similar to yacc/bison phases.
 type Parser struct {

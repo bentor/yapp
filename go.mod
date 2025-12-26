@@ -1,4 +1,4 @@
-module yapp
+module github.com/bentor/yapp
 
 go 1.25
 

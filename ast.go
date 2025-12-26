@@ -1,4 +1,4 @@
-package main
+package yapp
 
 // TokenType mirrors classic lexer phases.
 type TokenType string
@@ -12,10 +12,12 @@ const (
 
 // Position captures where a piece of text lives on the page.
 type Position struct {
-	Page  int     `json:"page"`
-	X     float64 `json:"x"`
-	Y     float64 `json:"y"`
-	Width float64 `json:"width"`
+	Page     int     `json:"page"`
+	X        float64 `json:"x"`
+	Y        float64 `json:"y"`
+	Width    float64 `json:"width"`
+	Font     string  `json:"font,omitempty"`
+	FontSize float64 `json:"fontSize,omitempty"`
 }
 
 // Token is the output of the lexer.

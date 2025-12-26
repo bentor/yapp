@@ -1,4 +1,4 @@
-package main
+package yapp
 
 import (
 	"encoding/json"
@@ -33,26 +33,22 @@ func TestParseExamplePDFs(t *testing.T) {
 				t.Fatalf("stat %s: %v", absPath, err)
 			}
 
-			tokens, err := NewLexer(absPath).Tokenize()
+			result, err := ParseFile(absPath)
 			if err != nil {
-				t.Fatalf("tokenize %s: %v", absPath, err)
+				t.Fatalf("parse %s: %v", absPath, err)
 			}
-			if len(tokens) == 0 {
-				t.Fatalf("no tokens produced for %s", absPath)
-			}
-
-			ast := NewParser(tokens).Parse()
+			ast := result.AST
+			md := result.Markdown
 			if len(ast.Pages) == 0 {
 				t.Fatalf("no pages parsed for %s", absPath)
+			}
+			if strings.TrimSpace(md) == "" {
+				t.Fatalf("empty markdown output for %s", absPath)
 			}
 
 			pretty, err := json.MarshalIndent(ast, "", "  ")
 			if err != nil {
 				t.Fatalf("marshal AST: %v", err)
-			}
-			md := renderMarkdown(ast)
-			if strings.TrimSpace(md) == "" {
-				t.Fatalf("empty markdown output for %s", absPath)
 			}
 
 			resultDir := filepath.Join(moduleRoot, "test-result")
