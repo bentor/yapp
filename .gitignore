@@ -1,0 +1,9 @@
+.gocache/
+bin/
+test-result/
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+.DS_Store
