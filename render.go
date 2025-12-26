@@ -278,14 +278,44 @@ func spanStarts(spans []TextSpan) []float64 {
 	return xs
 }
 
+func spansHasDigitOutsideFirst(spans []TextSpan) bool {
+	for i, sp := range spans {
+		if i == 0 {
+			continue
+		}
+		if isNumericLike(sp.Text) {
+			return true
+		}
+	}
+	return false
+}
+
 func consumeTable(lines []lineStyle) ([][]string, int) {
 	if len(lines) == 0 || len(lines[0].spans) < 3 {
 		return nil, 0
 	}
 
-	colStarts := clusteredStarts(lines[0].spans, 24)
+	// Prefer column anchors derived from the first numeric row (data rows often
+	// reflect the true column structure better than the header).
+	dataIdx := -1
+	for i, ln := range lines {
+		if len(ln.spans) < 2 {
+			continue
+		}
+		if spansHasDigitOutsideFirst(ln.spans) {
+			dataIdx = i
+			break
+		}
+	}
+
+	refLine := lines[0]
+	if dataIdx > 0 {
+		refLine = lines[dataIdx]
+	}
+
+	colStarts := clusteredStarts(refLine.spans, 24)
 	colStarts = mergeStarts(colStarts, 40)
-	if len(colStarts) < 3 || len(colStarts) > 6 {
+	if len(colStarts) < 2 || len(colStarts) > 5 {
 		return nil, 0
 	}
 	if medianGap(colStarts) < 18 {
