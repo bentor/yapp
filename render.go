@@ -13,6 +13,7 @@ type lineStyle struct {
 	fontSize float64
 	spans    []TextSpan
 	xs       []float64
+	italic   bool
 }
 
 func renderMarkdown(doc DocumentNode) string {
@@ -29,22 +30,23 @@ func renderMarkdown(doc DocumentNode) string {
 			b.WriteString("\n\n")
 		}
 
-	// Flatten blocks into line strings while preserving basic style hints.
-	var lines []lineStyle
-	for _, block := range page.Blocks {
-		for _, line := range block.Lines {
-			text := strings.TrimSpace(joinSpans(line.Spans))
-			if text == "" {
-				continue
+		// Flatten blocks into line strings while preserving basic style hints.
+		var lines []lineStyle
+		for _, block := range page.Blocks {
+			for _, line := range block.Lines {
+				text := strings.TrimSpace(joinSpans(line.Spans))
+				if text == "" {
+					continue
+				}
+				lines = append(lines, lineStyle{
+					text:     normalizeSpaces(text),
+					fontSize: maxSpanSize(line.Spans),
+					spans:    line.Spans,
+					xs:       spanStarts(line.Spans),
+					italic:   spansAreItalic(line.Spans),
+				})
 			}
-			lines = append(lines, lineStyle{
-				text:     normalizeSpaces(text),
-				fontSize: maxSpanSize(line.Spans),
-				spans:    line.Spans,
-				xs:       spanStarts(line.Spans),
-			})
 		}
-	}
 
 		// Render with generic structure detection.
 		firstHeading := true
@@ -71,6 +73,9 @@ func renderMarkdown(doc DocumentNode) string {
 		for i := 0; i < len(lines); i++ {
 			line := lines[i]
 			trim := strings.TrimSpace(line.text)
+			if line.italic && !strings.HasPrefix(trim, "_") && !strings.HasSuffix(trim, "_") {
+				trim = "_" + trim + "_"
+			}
 
 			if trim == "" {
 				flushList()
@@ -94,6 +99,16 @@ func renderMarkdown(doc DocumentNode) string {
 				flushPara()
 				renderTable(&b, rows)
 				i += used - 1
+				continue
+			}
+
+			if isAsideCandidate(trim) {
+				flushList()
+				flushPara()
+				if strings.HasPrefix(trim, "_") && strings.HasSuffix(trim, "_") && len(trim) > 2 {
+					trim = strings.TrimSuffix(strings.TrimPrefix(trim, "_"), "_")
+				}
+				b.WriteString("_" + trim + "_\n\n")
 				continue
 			}
 
@@ -205,6 +220,33 @@ func normalizeSpaces(s string) string {
 	return strings.Join(parts, " ")
 }
 
+func isAsideCandidate(s string) bool {
+	if len(s) < 6 || len(s) > 140 {
+		return false
+	}
+	if strings.Contains(s, "|") {
+		return false
+	}
+	if hasBulletPrefix(s) {
+		return false
+	}
+	idx := strings.IndexRune(s, ':')
+	if idx < 1 || idx > 32 {
+		return false
+	}
+	if strings.HasSuffix(s, ":") {
+		return false
+	}
+	words := strings.Fields(s)
+	if len(words) < 4 {
+		return false
+	}
+	if uppercaseRatio(s) > 0.5 {
+		return false
+	}
+	return true
+}
+
 func isHeadingCandidate(s string, fontSize, bodySize float64) bool {
 	if len(s) < 3 || len(s) > 120 {
 		return false
@@ -276,6 +318,24 @@ func spanStarts(spans []TextSpan) []float64 {
 		xs = append(xs, sp.Pos.X)
 	}
 	return xs
+}
+
+func spansAreItalic(spans []TextSpan) bool {
+	if len(spans) == 0 {
+		return false
+	}
+	var italic int
+	for _, sp := range spans {
+		if isItalicFont(sp.Pos.Font) {
+			italic++
+		}
+	}
+	return float64(italic) >= float64(len(spans))*0.6
+}
+
+func isItalicFont(font string) bool {
+	f := strings.ToLower(font)
+	return strings.Contains(f, "italic") || strings.Contains(f, "oblique") || strings.Contains(f, "it")
 }
 
 func spansHasDigitOutsideFirst(spans []TextSpan) bool {
