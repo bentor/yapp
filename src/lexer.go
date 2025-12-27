@@ -5,14 +5,18 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ledongthuc/pdf"
 )
 
 const (
-	lineTolerance = 2.5
-	wordGapFloor  = 1.5
-	wordGapScale  = 0.38
+	lineTolerance     = 2.5
+	wordGapFloor      = 1.5
+	wordGapScale      = 0.38
+	trackingGapScale  = 1.6
+	missingWidthScale = 0.6
 )
 
 // Lexer walks the PDF and emits tokens akin to lex/flex.
@@ -175,9 +179,9 @@ func buildWords(line []pdf.Text, page int) []Token {
 			continue
 		}
 
-		gap := g.X - (last.X + last.W)
+		gap := g.X - (last.X + glyphAdvance(last))
 		threshold := math.Max(wordGapFloor, math.Max(last.FontSize, g.FontSize)*wordGapScale)
-		if gap > threshold {
+		if gap > threshold && !shouldJoinTracked(last, g, gap, threshold) {
 			flush()
 			start = g
 		}
@@ -191,6 +195,52 @@ func buildWords(line []pdf.Text, page int) []Token {
 func cleanGlyphText(s string) string {
 	s = strings.ReplaceAll(s, "\uFFFD", "")
 	return strings.TrimSpace(s)
+}
+
+func glyphAdvance(g pdf.Text) float64 {
+	if g.W > 0 {
+		return g.W
+	}
+	text := strings.TrimSpace(g.S)
+	if text == "" || g.FontSize <= 0 {
+		return 0
+	}
+	runes := utf8.RuneCountInString(text)
+	if runes == 0 {
+		return 0
+	}
+	return float64(runes) * g.FontSize * missingWidthScale
+}
+
+func shouldJoinTracked(last, current pdf.Text, gap, threshold float64) bool {
+	if last.W > 0 && current.W > 0 {
+		return false
+	}
+	if gap > threshold*trackingGapScale {
+		return false
+	}
+	if last.Font != current.Font || math.Abs(last.FontSize-current.FontSize) > 0.1 {
+		return false
+	}
+	return isTrackingToken(strings.TrimSpace(last.S)) && isTrackingToken(strings.TrimSpace(current.S))
+}
+
+func isTrackingToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue
+		}
+		switch r {
+		case '.', '-', '/', '%', '°':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func maxFontSize(line []pdf.Text) float64 {
