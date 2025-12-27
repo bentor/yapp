@@ -14,6 +14,7 @@ type lineStyle struct {
 	spans    []TextSpan
 	xs       []float64
 	italic   bool
+	y        float64
 }
 
 func renderMarkdown(doc DocumentNode) string {
@@ -22,6 +23,8 @@ func renderMarkdown(doc DocumentNode) string {
 	if bodySize == 0 {
 		bodySize = 12
 	}
+
+	var lastTableHeader []string
 
 	for pageIdx, page := range doc.Pages {
 		if len(doc.Pages) > 1 {
@@ -44,6 +47,7 @@ func renderMarkdown(doc DocumentNode) string {
 					spans:    line.Spans,
 					xs:       spanStarts(line.Spans),
 					italic:   spansAreItalic(line.Spans),
+					y:        line.Spans[0].Pos.Y,
 				})
 			}
 		}
@@ -94,11 +98,18 @@ func renderMarkdown(doc DocumentNode) string {
 			}
 
 			// Opportunistic table detection: consecutive lines with aligned columns.
-			if rows, used := consumeTable(lines[i:]); used > 0 {
+			if res := consumeTable(lines[i:], bodySize); res.used > 0 {
 				flushList()
 				flushPara()
+				rows := res.rows
+				if !res.hasHeader && len(lastTableHeader) > 0 && len(rows) > 0 && len(lastTableHeader) == len(rows[0]) && looksLikeSKU(rows[0][0]) {
+					rows = append([][]string{lastTableHeader}, rows...)
+				}
 				renderTable(&b, rows)
-				i += used - 1
+				if res.hasHeader && len(rows) > 0 {
+					lastTableHeader = rows[0]
+				}
+				i += res.used - 1
 				continue
 			}
 
@@ -338,161 +349,349 @@ func isItalicFont(font string) bool {
 	return strings.Contains(f, "italic") || strings.Contains(f, "oblique") || strings.Contains(f, "it")
 }
 
-func spansHasDigitOutsideFirst(spans []TextSpan) bool {
-	for i, sp := range spans {
-		if i == 0 {
+type tableResult struct {
+	rows      [][]string
+	used      int
+	hasHeader bool
+}
+
+type tableCell struct {
+	startX float64
+	text   string
+}
+
+func consumeTable(lines []lineStyle, bodySize float64) tableResult {
+	if len(lines) == 0 {
+		return tableResult{}
+	}
+	if !lineLooksTableStart(lines[0], bodySize) {
+		return tableResult{}
+	}
+
+	window := len(lines)
+	if window > 14 {
+		window = 14
+	}
+
+	var starts []float64
+	tableFontMax := 0.0
+	tableLike := 0
+	for i := 0; i < window; i++ {
+		ln := lines[i]
+		if ln.text == "" || len(ln.spans) == 0 {
 			continue
 		}
-		if isNumericLike(sp.Text) {
+		startsForLine := lineCellStarts(ln.spans, ln.fontSize)
+		if len(startsForLine) < 2 {
+			continue
+		}
+		if bodySize > 0 && ln.fontSize > bodySize*0.92 && len(startsForLine) < 3 {
+			continue
+		}
+		starts = append(starts, startsForLine...)
+		tableLike++
+		if ln.fontSize > tableFontMax {
+			tableFontMax = ln.fontSize
+		}
+	}
+
+	if tableLike < 2 || len(starts) < 4 {
+		return tableResult{}
+	}
+
+	colStarts := clusteredStarts(starts, 24)
+	colStarts = mergeStarts(colStarts, 40)
+	if len(colStarts) < 3 || len(colStarts) > 6 {
+		return tableResult{}
+	}
+	gap := medianGap(colStarts)
+	if gap < 16 {
+		return tableResult{}
+	}
+
+	var clusters [][]lineStyle
+	var current []lineStyle
+	used := 0
+	var prevY float64
+	var prevSize float64
+	for used < len(lines) {
+		ln := lines[used]
+		if ln.text == "" {
+			break
+		}
+		if tableFontMax > 0 && ln.fontSize > tableFontMax*1.25 {
+			break
+		}
+		ok, _ := lineToRow(colStarts, ln.spans, gap, ln.fontSize)
+		if !ok {
+			break
+		}
+		if len(current) == 0 {
+			current = append(current, ln)
+		} else if rowBreak(prevY, ln.y, prevSize, ln.fontSize) {
+			clusters = append(clusters, current)
+			current = []lineStyle{ln}
+		} else {
+			current = append(current, ln)
+		}
+		prevY = ln.y
+		prevSize = ln.fontSize
+		used++
+	}
+	if len(current) > 0 {
+		clusters = append(clusters, current)
+	}
+
+	if len(clusters) < 2 {
+		return tableResult{}
+	}
+
+	rows := make([][]string, 0, len(clusters))
+	for _, group := range clusters {
+		row := make([]string, len(colStarts))
+		for _, ln := range group {
+			ok, cells := lineToRow(colStarts, ln.spans, gap, ln.fontSize)
+			if !ok {
+				continue
+			}
+			for i, cell := range cells {
+				if cell == "" {
+					continue
+				}
+				if row[i] == "" {
+					row[i] = cell
+				} else {
+					row[i] = strings.TrimSpace(row[i] + " " + cell)
+				}
+			}
+		}
+		if countNonEmpty(row) >= 2 {
+			rows = append(rows, row)
+		}
+	}
+
+	if len(rows) < 2 {
+		return tableResult{}
+	}
+
+	return tableResult{
+		rows:      rows,
+		used:      used,
+		hasHeader: rowLooksLikeHeader(rows[0]),
+	}
+}
+
+func lineLooksTableStart(line lineStyle, bodySize float64) bool {
+	if line.text == "" || len(line.spans) == 0 {
+		return false
+	}
+	starts := lineCellStarts(line.spans, line.fontSize)
+	if len(starts) >= 3 {
+		return true
+	}
+	if lineHasSKU(line.spans) {
+		return true
+	}
+	if hasHeaderKeyword(line.text) {
+		return true
+	}
+	if bodySize > 0 && line.fontSize <= bodySize*0.92 && len(starts) >= 2 {
+		return true
+	}
+	return false
+}
+
+func lineCellStarts(spans []TextSpan, fontSize float64) []float64 {
+	cells := lineCells(spans, fontSize)
+	if len(cells) == 0 {
+		return nil
+	}
+	starts := make([]float64, 0, len(cells))
+	for _, cell := range cells {
+		starts = append(starts, cell.startX)
+	}
+	return starts
+}
+
+func cellGapThreshold(fontSize float64) float64 {
+	if fontSize <= 0 {
+		return 12
+	}
+	threshold := fontSize * 1.65
+	if threshold < 12 {
+		threshold = 12
+	}
+	return threshold
+}
+
+func lineCells(spans []TextSpan, fontSize float64) []tableCell {
+	if len(spans) == 0 {
+		return nil
+	}
+	threshold := cellGapThreshold(fontSize)
+	var cells []tableCell
+	var buf []TextSpan
+	startX := spans[0].Pos.X
+	prevEnd := spans[0].Pos.X + spans[0].Pos.Width
+
+	flush := func() {
+		if len(buf) == 0 {
+			return
+		}
+		text := normalizeSpaces(joinSpans(buf))
+		if text != "" {
+			cells = append(cells, tableCell{startX: startX, text: text})
+		}
+		buf = nil
+	}
+
+	buf = append(buf, spans[0])
+	for _, sp := range spans[1:] {
+		gap := sp.Pos.X - prevEnd
+		if gap > threshold {
+			flush()
+			startX = sp.Pos.X
+			buf = append(buf, sp)
+		} else {
+			buf = append(buf, sp)
+		}
+		end := sp.Pos.X + sp.Pos.Width
+		if end > prevEnd {
+			prevEnd = end
+		}
+	}
+	flush()
+	return cells
+}
+
+func lineToRow(cols []float64, spans []TextSpan, gap, fontSize float64) (bool, []string) {
+	if len(cols) == 0 || len(spans) == 0 {
+		return false, nil
+	}
+	cells := lineCells(spans, fontSize)
+	if len(cells) == 0 {
+		return false, nil
+	}
+
+	row := make([]string, len(cols))
+	var sumDist float64
+	for _, cell := range cells {
+		idx := nearest(cols, cell.startX)
+		dist := math.Abs(cell.startX - cols[idx])
+		sumDist += dist
+		if row[idx] == "" {
+			row[idx] = cell.text
+		} else {
+			row[idx] = strings.TrimSpace(row[idx] + " " + cell.text)
+		}
+	}
+
+	meanDist := sumDist / float64(len(cells))
+	if gap > 0 && meanDist > gap*0.9 {
+		return false, nil
+	}
+
+	if countNonEmpty(row) == 0 {
+		return false, nil
+	}
+
+	return true, row
+}
+
+func rowBreak(prevY, y, prevSize, size float64) bool {
+	gap := prevY - y
+	if gap <= 0 {
+		return false
+	}
+	threshold := math.Max(prevSize, size) * 2.0
+	if threshold < 10 {
+		threshold = 10
+	}
+	return gap > threshold
+}
+
+func countNonEmpty(row []string) int {
+	count := 0
+	for _, c := range row {
+		if strings.TrimSpace(c) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func rowLooksLikeHeader(row []string) bool {
+	if len(row) == 0 {
+		return false
+	}
+	if looksLikeSKU(row[0]) {
+		return false
+	}
+	text := strings.ToLower(strings.Join(row, " "))
+	hits := 0
+	for _, keyword := range []string{"sku", "description", "unit", "price", "measure", "notes", "usd"} {
+		if strings.Contains(text, keyword) {
+			hits++
+		}
+	}
+	return hits >= 2
+}
+
+func looksLikeSKU(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || len(s) > 24 {
+		return false
+	}
+	hasLetter := false
+	hasDigit := false
+	hasDash := false
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r):
+			hasLetter = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case r == '-' || r == '–' || r == '—':
+			hasDash = true
+		default:
+			return false
+		}
+	}
+	return hasLetter && hasDigit && hasDash
+}
+
+func hasHeaderKeyword(s string) bool {
+	lower := strings.ToLower(s)
+	for _, keyword := range []string{"sku", "description", "unit", "price", "measure", "notes"} {
+		if strings.Contains(lower, keyword) {
 			return true
 		}
 	}
 	return false
 }
 
-func consumeTable(lines []lineStyle) ([][]string, int) {
-	if len(lines) == 0 || len(lines[0].spans) < 3 {
-		return nil, 0
+func lineHasSKU(spans []TextSpan) bool {
+	if len(spans) == 0 {
+		return false
 	}
-
-	// Prefer column anchors derived from the first numeric row (data rows often
-	// reflect the true column structure better than the header).
-	dataIdx := -1
-	for i, ln := range lines {
-		if len(ln.spans) < 2 {
-			continue
-		}
-		if spansHasDigitOutsideFirst(ln.spans) {
-			dataIdx = i
-			break
-		}
-	}
-
-	refLine := lines[0]
-	if dataIdx > 0 {
-		refLine = lines[dataIdx]
-	}
-
-	colStarts := clusteredStarts(refLine.spans, 24)
-	colStarts = mergeStarts(colStarts, 40)
-	if len(colStarts) < 2 || len(colStarts) > 5 {
-		return nil, 0
-	}
-	if medianGap(colStarts) < 18 {
-		return nil, 0
-	}
-
-	gap := medianGap(colStarts)
-
-	rows := make([][]string, 0, 4)
-	firstOK, firstRow := rowFits(colStarts, lines[0].spans, gap)
-	if !firstOK {
-		return nil, 0
-	}
-	rows = append(rows, firstRow)
-	maxLen := maxCellLen(firstRow)
-	seenNumeric := rowHasDigitOutsideFirst(firstRow)
-	used := 1
-
-	for used < len(lines) {
-		sp := lines[used].spans
-		if len(sp) < 2 {
-			break
-		}
-		ok, row := rowFits(colStarts, sp, gap)
-		if !ok {
-			break
-		}
-		hasNum := rowHasDigitOutsideFirst(row)
-		if seenNumeric && !hasNum {
-			break
-		}
-		if maxCellLen(row) > 40 {
-			break
-		}
-		rows = append(rows, row)
-		if hasNum {
-			seenNumeric = true
-		}
-		if l := maxCellLen(row); l > maxLen {
-			maxLen = l
-		}
-		used++
-	}
-
-	if len(rows) < 3 {
-		return nil, 0
-	}
-	if idx := firstNumericRow(rows); idx == -1 || idx > 2 {
-		return nil, 0
-	}
-	return rows, used
+	return looksLikeSKU(spans[0].Text)
 }
 
-func clusteredStarts(spans []TextSpan, tol float64) []float64 {
-	var starts []float64
-	for _, sp := range spans {
-		x := sp.Pos.X
-		placed := false
-		for i, v := range starts {
-			if math.Abs(v-x) <= tol {
-				starts[i] = (v + x) / 2
-				placed = true
-				break
-			}
-		}
-		if !placed {
-			starts = append(starts, x)
+func clusteredStarts(values []float64, tol float64) []float64 {
+	if len(values) == 0 {
+		return values
+	}
+	sort.Float64s(values)
+	clustered := []float64{values[0]}
+	for _, x := range values[1:] {
+		last := clustered[len(clustered)-1]
+		if math.Abs(x-last) <= tol {
+			clustered[len(clustered)-1] = (last + x) / 2
+		} else {
+			clustered = append(clustered, x)
 		}
 	}
-	sort.Float64s(starts)
-	return starts
-}
-
-func rowFits(cols []float64, spans []TextSpan, gap float64) (bool, []string) {
-	if len(spans) < 2 {
-		return false, nil
-	}
-	buckets := make([][]TextSpan, len(cols))
-	var sumDist float64
-	for _, sp := range spans {
-		idx := nearest(cols, sp.Pos.X)
-		dist := math.Abs(sp.Pos.X - cols[idx])
-		sumDist += dist
-		buckets[idx] = append(buckets[idx], sp)
-	}
-
-	meanDist := sumDist / float64(len(spans))
-	if meanDist > gap*0.8 {
-		return false, nil
-	}
-
-	filled := 0
-	for _, bucket := range buckets {
-		if len(bucket) == 0 {
-			continue
-		}
-		filled++
-		if w := width(bucket); w > gap*1.6+10 {
-			return false, nil
-		}
-	}
-	if filled < 2 || len(buckets[0]) == 0 {
-		return false, nil
-	}
-
-	row := make([]string, len(cols))
-	for i, bucket := range buckets {
-		var texts []string
-		for _, sp := range bucket {
-			text := strings.TrimSpace(sp.Text)
-			if text != "" {
-				texts = append(texts, text)
-			}
-		}
-		row[i] = normalizeSpaces(strings.Join(texts, " "))
-	}
-	return true, row
+	return clustered
 }
 
 func medianGap(xs []float64) float64 {
@@ -551,55 +750,6 @@ func mergeStarts(xs []float64, tol float64) []float64 {
 		}
 	}
 	return merged
-}
-
-func maxCellLen(row []string) int {
-	max := 0
-	for _, c := range row {
-		if l := len(c); l > max {
-			max = l
-		}
-	}
-	return max
-}
-
-func firstNumericRow(rows [][]string) int {
-	for i, row := range rows {
-		if i == 0 {
-			continue // skip header
-		}
-		for _, c := range row {
-			if isNumericLike(c) {
-				return i
-			}
-		}
-	}
-	return -1
-}
-
-func rowHasDigitOutsideFirst(row []string) bool {
-	for i, c := range row {
-		if i == 0 {
-			continue
-		}
-		if isNumericLike(c) {
-			return true
-		}
-	}
-	return false
-}
-
-func isNumericLike(s string) bool {
-	hasDigit := false
-	for _, r := range s {
-		switch {
-		case unicode.IsDigit(r):
-			hasDigit = true
-		case unicode.IsLetter(r):
-			return false
-		}
-	}
-	return hasDigit
 }
 
 func width(spans []TextSpan) float64 {
